@@ -183,7 +183,6 @@
 
 
 
-
 from flask import Flask, request, jsonify
 from datetime import datetime
 import gspread
@@ -191,7 +190,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 import threading
 import time
 import os
-import requests
 
 app = Flask(__name__)
 
@@ -200,14 +198,12 @@ app = Flask(__name__)
 # =========================
 GOOGLE_CRED_FILE = os.getenv("GOOGLE_CRED_FILE", "google_credentials.json")
 GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Trading Alerts")
-RENDER_URL = os.getenv("RENDER_URL", "")  # Your render app URL for self-ping
 
 LATEST_SHEET = "Latest_Signals"
 HISTORY_SHEET = "All_Alerts"
 
 ALERT_EXPIRY_SECONDS = 240
 CLEANUP_INTERVAL_SECONDS = 30
-PING_INTERVAL_SECONDS = 600  # 10 min ping
 
 # =========================
 # DUMMY ROW (LATEST ONLY)
@@ -303,7 +299,7 @@ def save_to_google_sheets(data):
     ensure_dummy_row()
 
     ticker = data.get("ticker")
-    if ticker == DUMMY_TICKER:
+    if ticker == DUMMY_TICKER or not ticker:
         return
 
     row = [
@@ -335,15 +331,18 @@ def save_to_google_sheets(data):
 # =========================
 @app.route("/webhook", methods=["POST", "GET"])
 def webhook():
-    if request.method == "POST":
-        try:
-            data = request.get_json(force=True)
-            save_to_google_sheets(data)
-            return jsonify({"status": "success"}), 200
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
-    else:
-        return "Webhook endpoint: Use POST requests only", 200
+    if request.method == "GET":
+        return "Webhook endpoint only accepts POST requests with JSON.", 200
+
+    try:
+        data = request.get_json(force=True)
+        if not data:
+            return jsonify({"error": "No JSON received"}), 400
+
+        save_to_google_sheets(data)
+        return jsonify({"status": "success"}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 # =========================
 # HEALTH CHECK
@@ -353,32 +352,11 @@ def health():
     return "OK", 200
 
 # =========================
-# SELF-PING (KEEP RENDER AWAKE)
-# =========================
-def ping_forever():
-    if not RENDER_URL:
-        print("No RENDER_URL set, skipping self-ping.")
-        return
-
-    while True:
-        try:
-            requests.get(RENDER_URL)
-            print(f"Pinged {RENDER_URL} at {datetime.now()}")
-        except Exception as e:
-            print("Ping error:", e)
-        time.sleep(PING_INTERVAL_SECONDS)
-
-# =========================
 # RUN (RENDER)
 # =========================
 if __name__ == "__main__":
     threading.Thread(
         target=cleanup_latest_signals_forever,
-        daemon=True
-    ).start()
-
-    threading.Thread(
-        target=ping_forever,
         daemon=True
     ).start()
 
