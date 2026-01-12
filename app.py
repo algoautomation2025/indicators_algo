@@ -391,8 +391,6 @@
 
 
 
-
-
 from flask import Flask, request, jsonify
 from datetime import datetime
 import gspread
@@ -413,9 +411,9 @@ GOOGLE_SHEET_NAME = os.getenv("GOOGLE_SHEET_NAME", "Trading Alerts")
 LATEST_SHEET = "Latest_Signals"
 HISTORY_SHEET = "All_Alerts"
 
-ALERT_EXPIRY_SECONDS = 240  # remove alerts older than 4 mins
-CLEANUP_INTERVAL_SECONDS = 30  # run cleanup every 30 seconds
-KEEP_ALIVE_INTERVAL = 300  # ping self every 5 mins
+ALERT_EXPIRY_SECONDS = 240
+CLEANUP_INTERVAL_SECONDS = 30
+KEEP_ALIVE_INTERVAL = 300
 
 # =========================
 # DUMMY ROW (LATEST ONLY)
@@ -434,11 +432,7 @@ DUMMY_ROW = [
 # =========================
 # GOOGLE AUTH
 # =========================
-scope = [
-    "https://spreadsheets.google.com/feeds",
-    "https://www.googleapis.com/auth/drive"
-]
-
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = ServiceAccountCredentials.from_json_keyfile_name(GOOGLE_CRED_FILE, scope)
 client = gspread.authorize(creds)
 spreadsheet = client.open(GOOGLE_SHEET_NAME)
@@ -450,9 +444,15 @@ history_sheet = spreadsheet.worksheet(HISTORY_SHEET)
 # =========================
 def parse_alert_time(raw_time):
     try:
-        return datetime.fromisoformat(raw_time.replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
-    except:
-        return raw_time
+        # Epoch milliseconds
+        if str(raw_time).isdigit():
+            ts = int(raw_time) / 1000
+            return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+        # ISO string
+        return datetime.fromisoformat(str(raw_time).replace("Z", "+00:00")).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception as e:
+        print("Time parse error:", e)
+        return str(raw_time)
 
 # =========================
 # ENSURE DUMMY ROW
@@ -486,10 +486,8 @@ def cleanup_latest_signals_forever():
 
             for r in reversed(rows_to_delete):
                 latest_sheet.delete_rows(r)
-
         except Exception as e:
             print("Cleanup error:", e)
-
         time.sleep(CLEANUP_INTERVAL_SECONDS)
 
 # =========================
@@ -500,42 +498,48 @@ def self_ping_forever():
     while True:
         try:
             requests.get(url, timeout=5)
-        except:
-            pass
+        except Exception as e:
+            print("Self-ping error:", e)
         time.sleep(KEEP_ALIVE_INTERVAL)
 
 # =========================
 # SAVE ALERT
 # =========================
 def save_to_google_sheets(data):
-    signal_map = {"1": "BUY", "-1": "SELL"}
+    signal_map = {"1": "BUY", "-1": "SELL", "BUY": "BUY", "SELL": "SELL"}
     ensure_dummy_row()
 
     ticker = data.get("ticker")
     if ticker == DUMMY_TICKER:
         return
 
+    raw_signal = str(data.get("signal")).upper()
+    if raw_signal == "BUY":
+        raw_signal = "1"
+    elif raw_signal == "SELL":
+        raw_signal = "-1"
+
     row = [
         ticker,
         data.get("exchange"),
         data.get("timeframe"),
-        signal_map.get(str(data.get("signal")), data.get("signal")),
+        signal_map.get(raw_signal, raw_signal),
         float(data.get("price")),
         parse_alert_time(data.get("time")),
         datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     ]
 
-    # HISTORY (ALL ALERTS)
+    # Append to history
     history_sheet.append_row(row, value_input_option="USER_ENTERED")
 
-    # LATEST (ONLY ONE PER TICKER)
+    # Update latest
     rows = latest_sheet.get_all_values()
     for i in range(2, len(rows)):
         if rows[i][0] == ticker:
             latest_sheet.delete_rows(i + 1)
             break
-
     latest_sheet.append_row(row, value_input_option="USER_ENTERED")
+
     print(f"Saved alert for {ticker}")
 
 # =========================
@@ -548,6 +552,7 @@ def webhook():
         save_to_google_sheets(data)
         return jsonify({"status": "success"}), 200
     except Exception as e:
+        print("Webhook error:", e)
         return jsonify({"error": str(e)}), 500
 
 # =========================
@@ -561,9 +566,7 @@ def health():
 # RUN (RENDER)
 # =========================
 if __name__ == "__main__":
-    # Start cleanup thread
     threading.Thread(target=cleanup_latest_signals_forever, daemon=True).start()
-    # Start self-ping thread
     threading.Thread(target=self_ping_forever, daemon=True).start()
 
     port = int(os.environ.get("PORT", 5000))
