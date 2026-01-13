@@ -6,7 +6,6 @@ import threading
 import time
 import os
 import requests
-import json
 from threading import Lock
 
 app = Flask(__name__)
@@ -24,7 +23,7 @@ CLEANUP_INTERVAL_SECONDS = 60
 KEEP_ALIVE_INTERVAL = 300
 
 # =========================
-# THREAD LOCK (CRITICAL)
+# THREAD LOCK
 # =========================
 gsheet_lock = Lock()
 
@@ -43,19 +42,30 @@ DUMMY_ROW = [
 ]
 
 # =========================
-# GOOGLE AUTH (RENDER SAFE)
+# GOOGLE AUTH (RENDER + LOCAL SAFE)
 # =========================
 scope = [
     "https://spreadsheets.google.com/feeds",
     "https://www.googleapis.com/auth/drive"
 ]
 
-google_creds_json = os.getenv("GOOGLE_CRED_JSON")
-if not google_creds_json:
-    raise RuntimeError("GOOGLE_CRED_JSON env var not set")
+GOOGLE_CRED_FILE = os.getenv("GOOGLE_CRED_FILE", "google_credentials.json")
+render_secret_path = f"/etc/secrets/{GOOGLE_CRED_FILE}"
 
-creds_dict = json.loads(google_creds_json)
-creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+if os.path.exists(render_secret_path):
+    cred_path = render_secret_path
+elif os.path.exists(GOOGLE_CRED_FILE):
+    cred_path = GOOGLE_CRED_FILE
+else:
+    raise RuntimeError(
+        f"Google credentials file not found. "
+        f"Tried {render_secret_path} and {GOOGLE_CRED_FILE}"
+    )
+
+creds = ServiceAccountCredentials.from_json_keyfile_name(
+    cred_path,
+    scope
+)
 
 client = gspread.authorize(creds)
 spreadsheet = client.open(GOOGLE_SHEET_NAME)
@@ -175,9 +185,7 @@ def save_to_google_sheets(data):
     with gsheet_lock:
         ensure_dummy_row()
 
-        history_sheet.append_row(
-            row, value_input_option="USER_ENTERED"
-        )
+        history_sheet.append_row(row, value_input_option="USER_ENTERED")
 
         rows = latest_sheet.get_all_values()
         for i in range(2, len(rows)):
@@ -185,9 +193,7 @@ def save_to_google_sheets(data):
                 latest_sheet.delete_rows(i + 1)
                 break
 
-        latest_sheet.append_row(
-            row, value_input_option="USER_ENTERED"
-        )
+        latest_sheet.append_row(row, value_input_option="USER_ENTERED")
 
     print(f"Saved alert for {ticker}")
 
